@@ -3,11 +3,19 @@ use solana_program::{
     entrypoint::ProgramResult,
     pubkey::Pubkey,
     msg,
-    account_info::AccountInfo,
+    account_info::{ next_account_info, AccountInfo },
+    system_instruction,
+    program_error::ProgramError,
+    sysvar::{ rent::Rent, Sysvar },
+    program::{ invoke_signed },
+    borsh::try_from_slice_unchecked,
 };
-
+use std::convert::TryInfo;
 pub mod instruction;
-use instruction::{ MovieInstruction };
+pub mod state;
+use instruction::MovieInstruction;
+use state::MovieAccountState;
+use borsh::BorshSerialize;
 
 entrypoint!(process_instruction);
 
@@ -37,4 +45,55 @@ pub fn add_movie_review(
     msg!("Title: {}", title);
     msg!("Rating: {}", rating);
     msg!("Description: {}", description);
+
+    let account_info_iter = &mut accounts.iter();
+
+    let initializer = next_account_info(account_info_iter)?;
+    let pda_account = next_account_info(account_info_iter)?;
+    let system_program = next_account_info(account_info_iter)?;
+
+    // derive PDA and check that it matches client
+    let (pda, bump_seed) = Pubkey::find_program_address(
+        &[initializer.key.as_ref(), title.as_bytes().as_ref()],
+        program_id
+    );
+
+    // calculate account size required
+    let account_len: usize = 1 + 1 + (4 + title.len()) + (4 + description.len());
+
+    // calculate rent required
+    let rent = Rent::get()?;
+    let rent_lamports = rent.minimum_balance(account_len);
+
+    // create the account
+    invoke_signed(
+        &system_instruction::create_account(
+            initializer.key,
+            pda_account.key,
+            rent_lamports,
+            account_len.try_into().unwrap(),
+            program_id
+        ),
+        &[initializer.clone(), pda_account.clone(), system_program.clone()],
+        &[&[initializer.key.as_ref(), title.as_bytes().as_ref(), &[bump_seed]]]
+    )?;
+
+    msg!("PDA created: {}", pda);
+
+    msg!("unpacking state account");
+    let mut account_data = try_from_slice_unchecked::<MovieAccountState>(
+        &pda_account_data.borrow()
+    ).unwrap();
+    msg!("borrowed account data");
+
+    account_data.title = title;
+    account_data.rating = rating;
+    account_data.description = description;
+    account_data.is_initialized = true;
+
+    msg!("serializing account");
+    account_data.serialize(&mut &mut pda_account.data.borrow_mut()[..])?;
+    msg!("state account serialized");
+
+    Ok(())
 }
